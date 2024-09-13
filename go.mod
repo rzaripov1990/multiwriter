@@ -1,4 +1,4 @@
-module multiwriter
+module github.com/rzaripov1990/multiwriter
 
 go 1.22.1
 
