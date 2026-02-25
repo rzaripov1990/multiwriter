@@ -2,9 +2,10 @@ package multiwriter
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
+	"sync"
 )
 
 const (
@@ -16,6 +17,7 @@ const (
 
 type (
 	MultiWriter struct {
+		mu        sync.Mutex
 		colorize  bool
 		ignoreErr bool
 		writers   []io.Writer
@@ -31,58 +33,88 @@ func New(colorize bool, ignoreErrors bool, wr ...io.Writer) *MultiWriter {
 }
 
 func (m *MultiWriter) Write(p []byte) (n int, err error) {
-	color := func() int {
-		if m.colorize {
-			return levelColor[m.detectLogLevel(p)]
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	color := 0
+	if m.colorize {
+		color = levelColor[m.detectLogLevel(p)]
+	}
+
+	for _, w := range m.writers {
+		if w == nil {
+			continue
 		}
-		return 0
-	}()
 
-	for i := range m.writers {
-		if m.writers[i] != nil {
-			if m.colorize {
-				if val, ok := m.writers[i].(interface{ Colored() bool }); ok && val.Colored() {
-					n, err = fmt.Fprintf(m.writers[i], "\x1b[%dm%s\x1b[0m", color, string(p))
-					if err != nil && !m.ignoreErr {
-						return
-					}
-					continue
+		if m.colorize {
+			if val, ok := w.(interface{ Colored() bool }); ok && val.Colored() {
+				if werr := writeColored(w, color, p); werr != nil && !m.ignoreErr {
+					return 0, werr
 				}
+				continue
 			}
+		}
 
-			n, err = m.writers[i].Write(p)
-			if err != nil && !m.ignoreErr {
-				return
-			}
+		wn, werr := w.Write(p)
+		if werr == nil && wn != len(p) {
+			werr = io.ErrShortWrite
+		}
+		if werr != nil && !m.ignoreErr {
+			return wn, werr
 		}
 	}
-	return
+
+	// If configured to ignore destination errors, report success to the caller
+	// (so loggers don't treat the write as failed).
+	if m.ignoreErr {
+		return len(p), nil
+	}
+	return len(p), nil
 }
 
 var (
-	stringLevel = map[string]slog.Level{
-		`"INFO"`:  slog.LevelInfo,
-		`=INFO`:   slog.LevelInfo,
-		`"WARN"`:  slog.LevelWarn,
-		`=WARN`:   slog.LevelWarn,
-		`"ERROR"`: slog.LevelError,
-		`=ERROR`:  slog.LevelError,
-		`"DEBUG"`: slog.LevelDebug,
-		`=DEBUG`:  slog.LevelDebug,
-	}
 	levelColor = map[slog.Level]int{
 		slog.LevelInfo:  ColorBlue,
 		slog.LevelDebug: ColorGray,
 		slog.LevelWarn:  ColorYellow,
 		slog.LevelError: ColorRed,
 	}
+	levelPatterns = []struct {
+		needle []byte
+		level  slog.Level
+	}{
+		{[]byte(`"ERROR"`), slog.LevelError},
+		{[]byte(`=ERROR`), slog.LevelError},
+		{[]byte(`"WARN"`), slog.LevelWarn},
+		{[]byte(`=WARN`), slog.LevelWarn},
+		{[]byte(`"INFO"`), slog.LevelInfo},
+		{[]byte(`=INFO`), slog.LevelInfo},
+		{[]byte(`"DEBUG"`), slog.LevelDebug},
+		{[]byte(`=DEBUG`), slog.LevelDebug},
+	}
 )
 
 func (m *MultiWriter) detectLogLevel(s []byte) slog.Level {
-	for key, level := range stringLevel {
-		if bytes.Index(s, []byte(key)) > 0 {
-			return level
+	for i := range levelPatterns {
+		if bytes.Contains(s, levelPatterns[i].needle) {
+			return levelPatterns[i].level
 		}
 	}
 	return slog.LevelDebug
+}
+
+func writeColored(w io.Writer, color int, p []byte) error {
+	// \x1b[<color>m + payload + \x1b[0m
+	buf := make([]byte, 0, len(p)+16)
+	buf = append(buf, 0x1b, '[')
+	buf = strconv.AppendInt(buf, int64(color), 10)
+	buf = append(buf, 'm')
+	buf = append(buf, p...)
+	buf = append(buf, 0x1b, '[', '0', 'm')
+
+	n, err := w.Write(buf)
+	if err == nil && n != len(buf) {
+		return io.ErrShortWrite
+	}
+	return err
 }

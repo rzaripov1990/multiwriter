@@ -14,8 +14,16 @@ type (
 )
 
 func (m *KafkaLogger) Write(p []byte) (n int, err error) {
-	err = m.client.WriteMessages(m.ctx, kgo.Message{Value: p})
-	return
+	// Copy p because kafka-go writer may retain the slice beyond the call
+	// (especially with Async=true), while callers are allowed to reuse p.
+	b := make([]byte, len(p))
+	copy(b, p)
+
+	err = m.client.WriteMessages(m.ctx, kgo.Message{Value: b})
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func (m *KafkaLogger) Close() {

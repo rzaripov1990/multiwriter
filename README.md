@@ -6,8 +6,15 @@
 
 - Log simultaneously to multiple destinations (`io.Writer`).
 - Colorize output based on log levels (`INFO`, `WARN`, `ERROR`, `DEBUG`).
-- Option to ignore errors during log writing to destinations.
-- Support for custom destinations, with detection of color output capabilities.
+- Best-effort mode to ignore destination errors (`ignoreErrors=true`).
+- Support for custom destinations, with opt-in color output capability detection (`Colored() bool`).
+
+## Behavior
+
+- `Write(p)` **returns `n=len(p)` on success** (even when colorization adds ANSI bytes to some destinations).
+- If `ignoreErrors=false`, the first destination error stops the write and is returned.
+- If `ignoreErrors=true`, destination errors are ignored and `Write(p)` returns **`(len(p), nil)`**.
+- `MultiWriter` serializes concurrent `Write` calls (so log lines are less likely to interleave).
 
 ## Installation
 
@@ -61,9 +68,14 @@ package main
 
 import (
     "context"
+    "os"
+
+    colored_logger "github.com/rzaripov1990/multiwriter/ext/colored"
+    kafka_logger "github.com/rzaripov1990/multiwriter/ext/kafka"
     "github.com/rzaripov1990/multiwriter"
-    "github.com/segmentio/kafka-go"
     "log/slog"
+
+    kgo "github.com/segmentio/kafka-go"
 )
 
 func main() {
@@ -74,9 +86,9 @@ func main() {
     // Destination 1: Kafka logger setup
     kafka := kafka_logger.New(
         &kgo.Writer{
-            Addr:    kgo.TCP("127.0.0.1:9092"),
+            Addr:     kgo.TCP("127.0.0.1:9092"),
             Balancer: &kgo.RoundRobin{},
-            Topic:   "logs",
+            Topic:    "logs",
         },
     )
     defer kafka.Close()
@@ -129,3 +141,19 @@ func (cw *CustomWriter) Colored() bool {
     return true // Supports colorized output
 }
 ```
+
+## Development
+
+Run unit tests:
+
+```bash
+go test ./...
+```
+
+Run integration tests (Kafka/file demo) explicitly:
+
+```bash
+go test -tags=integration ./...
+```
+
+To bring up Kafka locally for integration tests, see `example/docker-compose.yml`.
